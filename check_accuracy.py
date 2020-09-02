@@ -114,4 +114,3 @@ if __name__ == "__main__":
     if (PRINT_WRONGS_PER_FIELD):
         print("Distribution of wrongs per field:")
         print(sorted(wrongs_per_field.items(), key= lambda x: x[0]))
-    
