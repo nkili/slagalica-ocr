@@ -6,6 +6,7 @@ import os
 import errno
 import pytesseract
 import json
+import re
 
 def mkdir(value):
     if not os.path.exists(value):
@@ -35,16 +36,69 @@ def imagedist(ima, imb, mask, nonzero_pixelcount):
     dist = np.sum(imc) / nonzero_pixelcount
     return dist
 
+def crop_empty(img):
+    for remove_top in range(img.shape[0]):
+        if np.mean(img[remove_top]) != 255: break
+    for remove_bottom in range(img.shape[0]-1, 0, -1):
+        if np.mean(img[remove_bottom]) != 255: break
+    for remove_left in range(img.shape[1]):
+        if np.mean(img[:,remove_left]) != 255: break
+    for remove_right in range(img.shape[1]-1, 0, -1):
+        if np.mean(img[:,remove_right]) != 255: break
+    return img[remove_top:remove_bottom,remove_left:remove_right]
+
+def get_area_of_removed_row(row, cnts):
+    full_area = 0
+    for cnt in cnts:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if row >= y and row <= y + h:
+            full_area += cv2.contourArea(cnt)
+    return full_area
+
+def is_border_contour(cnt, img):
+    area = cv2.contourArea(cnt)
+    x, y, w, h = cv2.boundingRect(cnt)
+    return w > img.shape[1] * 0.33 or h/w > 5 or w/h > 5
+
+def is_important_contour(cnt, top_edge, bottom_edge):
+    x, y, w, h = cv2.boundingRect(cnt)
+    y_mid = y + h / 2
+    return y_mid > top_edge and y_mid < bottom_edge
+
+def keep_important_contours(img):
+    cnts = cv2.findContours(img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)[0]
+    cnts = [cnt for cnt in cnts if not is_border_contour(cnt, img)]
+    row_areas = [get_area_of_removed_row(row, cnts) for row in range(img.shape[0])]
+    row_areas_threshold = np.mean(row_areas) * .35
+    for top_edge in range(img.shape[0]):
+        if row_areas[top_edge] > row_areas_threshold: break
+    for bottom_edge in range(img.shape[0]-1, 0, -1):
+        if row_areas[bottom_edge] > row_areas_threshold: break
+    new_cnts = [cnt for cnt in cnts if is_important_contour(cnt, top_edge, bottom_edge)]
+    new_img = np.ones_like(img) * 255
+    cv2.drawContours(new_img, new_cnts, -1, (0,0,0), -1)
+    return new_img
+
 def process_image(img):
+    INITIAL_PAD_Y, INITIAL_PAD_X = (8, 8), (8, 8)
+    FINAL_PAD_Y, FINAL_PAD_X = (36, 36), (72, 72)
+    kernel = np.ones((3,3), np.uint8)
     greyscale = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     scale = cv2.resize(greyscale, (0, 0), None, 5, 5, cv2.INTER_LANCZOS4)
-    res, threshold = cv2.threshold(scale, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    kernel = np.ones((5,5), np.uint8)
-    erosion = cv2.erode(threshold, kernel, iterations = 1)
-    return erosion
+    padding1 = np.pad(scale, (INITIAL_PAD_Y, INITIAL_PAD_X), mode="constant", constant_values=255)
+    _, threshold = cv2.threshold(padding1, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    threshold = threshold[INITIAL_PAD_Y[0]:-INITIAL_PAD_Y[1],INITIAL_PAD_X[0]:-INITIAL_PAD_X[1]]
+    padding2 = np.pad(threshold, (INITIAL_PAD_Y, INITIAL_PAD_X), mode="constant", constant_values=255)
+    imp_contours = keep_important_contours(padding2)
+    closing = cv2.morphologyEx(imp_contours, cv2.MORPH_CLOSE, kernel, iterations = 3)
+    cropping = crop_empty(closing)
+    final_padding = np.pad(cropping, (FINAL_PAD_Y, FINAL_PAD_X), mode="constant", constant_values=255)
+    return final_padding
 
 def im2str(img):
-    return pytesseract.image_to_string(img, config="--psm 7", lang="srp")
+    tess_out =  pytesseract.image_to_string(img, config=" --psm 7 --tessdata-dir ./", lang="srp_best").strip()
+    regex = re.compile('[^0123456789АБВГДЂЕЖЗИЈКЛЉМНЊОПРСТЋУФХЦЧЏШ.\-\/ "]')
+    return regex.sub("", tess_out.upper()).strip()
 
 def get_autocrop_coordinates(img, background = None):
     if type(background) == type(None):
@@ -142,7 +196,7 @@ class EpisodeMasks(object):
 
         # Scale crops
         for key, val in self.field_crops.items():
-            self.field_crops[key] = (round(Ry * val[0]), round(Ry * val[1]), round(Rx * val[2]), round(Rx * val[3]))
+            self.field_crops[key] = (round(Ry * val[0])-8, round(Ry * val[1])+8, round(Rx * val[2])-8, round(Rx * val[3])+8)
 
     def resized_copy(self, framewidth, frameheight):
         copy = EpisodeMasks(self.mask_type)
