@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 
 from colorama import Fore, Back, Style
 from collections import defaultdict
@@ -24,7 +25,9 @@ wrongs_per_field = defaultdict(lambda: 0)
 def check_line(predicted, correct):
     if predicted == correct:
         return (1, 0, 0)
-    elif predicted[-1] == "." and predicted[:-1] in correct:
+    predicted = predicted.replace("?", r"\?")
+    predicted_regex = re.compile(predicted.replace(".", ".+"))
+    if predicted_regex.fullmatch(correct):
         return (0, 1, 0)
     else:
         return (0, 0, 1)
